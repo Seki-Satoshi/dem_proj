@@ -79,5 +79,6 @@ def visualize_dem(dem_npy: BinaryIO, output_path: str, upsample: bool = True, pr
         cv2.imshow("DEM", img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
+        cv2.waitKey(1)
     else:
         cv2.imwrite(output_path, img)

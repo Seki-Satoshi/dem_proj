@@ -1,20 +1,60 @@
+import xml.etree.ElementTree as ET
 import numpy as np
 import cv2
 
+from dem_utils import tupleList2tuple
+
 # dem data
-DEM_PATH = "/Users/fukaya/Documents/pythons/dem_proj/output/tiles/54380114.npy"
-dem = np.array(np.load(DEM_PATH), dtype="float64")
+DEM_PATH = "/Users/fukaya/Documents/20260422141454327-001/DEMDATAS/FG-GML-5438-01-14-DEM5A-20250819.xml"
+# XML reading
+tree = ET.parse(DEM_PATH)
+root = tree.getroot()
+ns = {
+    "gml": 'http://www.opengis.net/gml/3.2',
+    "dem": 'http://fgd.gsi.go.jp/spec/2008/FGD_GMLSchema'
+}
+tuples = root.find('.//gml:tupleList', ns).text
+lines_strip = tupleList2tuple(tuples)
+code_list = tupleList2tuple(tuples, True)
+
+# get width and height
+envelope = root.find('.//gml:GridEnvelope',ns)
+low = envelope.find('gml:low', ns).text
+high = envelope.find('gml:high', ns).text
+low_x, low_y = map(int, low.split())
+high_x, high_y = map(int, high.split())
+width = high_x - low_x + 1
+height = high_y - low_y + 1
+
+# check data size
+if len(lines_strip) != width*height:
+    lines_strip = lines_strip + tuple([-9999.0]) * abs( width*height - len(lines_strip) )
+    code_list = code_list + tuple(["データなし"]) * abs( width*height - len(code_list) )
+
+# convert tuple to face
+composed_data = np.array(lines_strip).reshape(height, width)
+code_data = np.array(code_list).reshape(height, width)
+
+# list[list[float]] to ndarray(float64)
+dem = np.array(composed_data, dtype=np.float64)
+mapping, _ = np.unique(code_data, return_inverse=True)
+codes = _.reshape(code_data.shape)
+print(mapping)
+print(codes)
+idx = np.where(mapping == "内水面")[0][0] # (array([0]),)が返ってくる
+dem = np.where(codes == idx, dem - 3, dem)
+
 h, w = dem.shape
 print(f"{h=}, {w=}")
 # exit(0)
 
 # water tile
-wtile = np.full_like(dem, 0.05, dtype="float64")
+wtile = np.full_like(dem, 0.05, dtype=np.float64)
 print(wtile)
 # exit(0)
 
 # direction tile
-dtile = np.zeros(dem.shape+(8,), dtype="float64")
+dtile = np.zeros(dem.shape+(8,), dtype=np.float64)
 directions = [(1,0), (1,1), (0,1), (-1,1), (-1,0), (-1,-1), (0,-1), (1,-1)]
 "D8 method"
 for y in range(h):
@@ -32,83 +72,51 @@ print(dtile)
 # exit(0)
 
 # flow speed
-"manning+numpynature"
-def fs():
-    global wtile
-
-    ftile = np.zeros_like(dtile, dtype="float64")
-    for y in range(h):
-        for x in range(w):
-            for i,flows in enumerate(dtile[y, x]):
-                if flows == 0:
-                    continue
-                ax, ay = x+directions[i][0], y+directions[i][1]
-                hi = np.float64(wtile[y, x])
-                dx = np.float64(np.linalg.norm([(ax-x)*5, (ay-y)*5]))
-                z1 = np.float64(dem[y, x])
-                z2 = np.float64(dem[ay, ax])
-                dh = (10/75)*np.cbrt(np.pow(hi*dx,5)/(4*hi*hi + 4*hi*dx + dx*dx))*np.sqrt((z1-z2)/dx)
-                ftile[y, x, i] = dh*flows
-    DY = np.array([ 1, 1, 0,-1,-1,-1, 0, 1])
-    DX = np.array([ 0, 1, 1, 1, 0,-1,-1,-1])
-    flow_pad = np.pad(ftile, ((1,1),(1,1),(0,0)))
-    y_idx = np.arange(h)[:, None, None]
-    x_idx = np.arange(w)[None, :, None]
-    d_idx = np.arange(8)[None, None, :]
-
-    inflow_3d = flow_pad[y_idx+1-DY, x_idx+1-DX, d_idx]
-
-    inflow = inflow_3d.sum(axis=2)
-    outflow = ftile.sum(axis=2)
-
-    wtile = wtile - outflow + inflow
 "manning+compress"
 def fs2():
     global wtile
 
-    inflow = np.zeros_like(dem, dtype=np.float64)
-    outflow = np.zeros_like(dem, dtype=np.float64)
+    newflow = np.copy(wtile)
+    surface = dem + wtile
     for y in range(h):
         for x in range(w):
-            for i,flows in enumerate(dtile[y, x]):
-                if flows == 0:
-                    continue
-                ax, ay = x+directions[i][0], y+directions[i][1]
-                hi = np.float64(wtile[y, x])
-                dx = np.float64(np.linalg.norm([(ax-x)*5, (ay-y)*5]))
-                z1 = np.float64(dem[y, x])
-                z2 = np.float64(dem[ay, ax])
-                dh = (10/75)*np.cbrt(np.pow(hi*dx,5)/(4*hi*hi + 4*hi*dx + dx*dx))*np.sqrt((z1-z2)/dx)
-                ftile = dh*flows
-                inflow[ay, ax] += ftile
-                outflow[y, x] += ftile
-    wtile = wtile - outflow + inflow
-"manning+multied"
+            i = np.argmax(dtile[y, x])
+            ax, ay = x+directions[i][0], y+directions[i][1]
+            if ax<0 or w<=ax or ay<0 or h<=ay:
+                continue
+            hi = wtile[y, x]
+            dS = surface[y, x] - surface[ay, ax]
+            dx = 5.0 if i%2==0 else 7.0710678118654755
+            dQ = (2/3*hi)*np.cbrt(np.square(5*hi/(2*hi+5)))*np.sqrt(dS/dx)
+            ftile = dQ if dQ<=hi else hi
+            newflow[y, x] -= ftile
+            newflow[ay, ax] += ftile
+    wtile = newflow
 def fs3():
     global wtile
 
-    ftile = np.zeros_like(dtile, dtype="float64")
-    dem_pad = np.pad(dem, 1, constant_values=-9999)
+    newflow = np.copy(wtile)
+    outflow = np.zeros((h, w), dtype="float64")
+    inflow  = np.zeros_like(dtile, dtype="float64")
+    surface = np.copy(dem + wtile)
+    sur_pad = np.pad(surface, 1, constant_values=0) 
+
     for i, (dx, dy) in enumerate(directions):
-        hi = wtile
-        dist = np.float64(np.linalg.norm([dx*5, dy*5]))
-        z1 = dem
-        z2 = dem_pad[1-dy:h+1-dy, 1-dx:w+1-dx]  # 隣接セルの標高
-        dh = (10/75) * np.cbrt(np.pow(hi * dist, 5) / (4*hi*hi + 4*hi*dist + dist*dist)) * np.sqrt(np.maximum(z1 - z2, 0) / dist)
-        ftile[:, :, i] = dh * dtile[:, :, i]
-    DY = np.array([ 1, 1, 0,-1,-1,-1, 0, 1])
-    DX = np.array([ 0, 1, 1, 1, 0,-1,-1,-1])
-    flow_pad = np.pad(ftile, ((1,1),(1,1),(0,0)))
-    y_idx = np.arange(h)[:, None, None]
-    x_idx = np.arange(w)[None, :, None]
-    d_idx = np.arange(8)[None, None, :]
+        hi = np.copy(wtile)
+        dz = 5.0 if i%2==0 else 7.0710678118654755
+        dS = surface - sur_pad[1+dy:h+1+dy, 1+dx:w+1+dx]
+        dS = np.where(dS>=0, dS, 0)
+        dQ = (2/3*hi)*np.cbrt(np.square(5*hi/(2*hi+5)))*np.sqrt(dS/dz)
+        dQ = np.minimum(dQ, hi)
+        dQ = np.where(dQ>=0, dQ, 0)
+        dQ = dQ * dtile[:, :, i]
 
-    inflow_3d = flow_pad[y_idx+1-DY, x_idx+1-DX, d_idx]
-
-    inflow = inflow_3d.sum(axis=2)
-    outflow = ftile.sum(axis=2)
-
-    wtile = wtile - outflow + inflow
+        outflow += dQ
+        inflow[:, :, (i+4)%8] += dQ
+        # inflow_pad = np.pad(dQ, 1)
+        # inflow += inflow_pad[1-dy:h+1-dy, 1-dx:w+1-dx]
+    newflow = wtile - outflow + np.sum(inflow, axis=2)
+    wtile = newflow
 # exit(0)
 
 # generate picture
@@ -135,8 +143,8 @@ def water_imager(water: np.ndarray, save_path: str):
 OUTPUT_DIR = "/Users/fukaya/Documents/pythons/dem_proj/output/images"
 # calc start
 for step in range(5000+1):
-    print(f"{step*0.1:.1f}sec")
-    fs2()
+    fs3()
     if step%50 == 0:
+        print(f"{step*0.1:.1f}sec")
         water_imager(wtile, OUTPUT_DIR+f"/step_{step:05d}.png")
         print(f"saved in {step=}")

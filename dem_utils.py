@@ -110,9 +110,12 @@ class InvalidDataException(IndexError):
     def __init__(self, *args):
         super().__init__(*args)
 
-def tupleList2tuple(tupleList: str):
+def tupleList2tuple(tupleList: str, getcode: bool = False):
     lines = tupleList.split("\n")
-    lines_strip = [float(l.strip()[l.strip().find(',')+1:]) for l in lines if l!='']
+    if getcode:
+        lines_strip = [str(l.strip()[:l.strip().find(',')]) for l in lines if l!='']
+    else:
+        lines_strip = [float(l.strip()[l.strip().find(',')+1:]) for l in lines if l!='']
     return tuple(lines_strip)
 
 def xml2npy(ifp: TextIO, ofp: BinaryIO, filling:bool=False):

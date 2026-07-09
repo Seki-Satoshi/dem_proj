@@ -39,10 +39,10 @@ code_data = np.array(code_list).reshape(height, width)
 dem = np.array(composed_data, dtype=np.float64)
 mapping, _ = np.unique(code_data, return_inverse=True)
 codes = _.reshape(code_data.shape)
-print(mapping)
-print(codes)
+# print(mapping)
+# print(codes)
 idx = np.where(mapping == "内水面")[0][0] # (array([0]),)が返ってくる
-dem = np.where(codes == idx, dem - 3, dem)
+# dem = np.where(codes == idx, dem - 3, dem)
 
 h, w = dem.shape
 print(f"{h=}, {w=}")
@@ -50,7 +50,7 @@ print(f"{h=}, {w=}")
 
 # water tile
 wtile = np.full_like(dem, 0.05, dtype=np.float64)
-print(wtile)
+# print(wtile)
 # exit(0)
 
 # direction tile
@@ -67,8 +67,66 @@ for y in range(h):
                 d8[i] = float('inf')
             else:
                 d8[i] = dem[ay, ax] - elev
-        dtile[y, x, np.argmin(d8)] = 1.0
-print(dtile)
+        if np.min(d8)<0:
+            dtile[y, x, np.argmin(d8)] = 1.0
+# print(dtile)
+
+"fast D8 method"
+dwtile = np.pad(dem+wtile, 1, constant_values=9999)
+slop = np.stack([
+    dwtile[1+dy:h+1+dy, 1+dx:w+1+dx] - dwtile[1:h+1, 1:w+1]
+    for dx,dy in directions
+])
+dire = np.where(np.min(slop, axis=0) < 0, np.argmin(slop, axis=0), -1)
+dtile2 = np.zeros_like(dtile, dtype=np.float64)
+mask_1 = dire>=0
+dtile2[mask_1] = np.eye(8)[dire[mask_1]]
+if (dtile == dtile2).all():
+    print("CORRECT")
+
+"MD8 method"
+dtile3 = np.zeros_like(dtile, dtype=np.float64)
+dwtile = np.copy(dem+wtile)
+for y in range(height):
+    for x in range(width):
+        elev = dwtile[y, x]
+        md8 = [float(0)]*8
+        for i,d in enumerate(directions):
+            ax, ay = x+d[0], y+d[1]
+            if (ax<0 or w<=ax) or (ay<0 or h<=ay):
+                md8[i] = float('inf')
+            else:
+                md8[i] = dwtile[ay, ax] - elev
+        if np.any(np.array(md8)<0):
+            md8 = np.abs(np.where(np.array(md8)<0, np.array(md8), 0))
+            dtile3[y, x, :] = md8 / md8.sum()
+# print(dtile3)
+
+def fastDirection(surface: np.ndarray):
+    dwtile = np.pad(surface, 1, constant_values=9999)
+    slop = np.stack([
+        dwtile[1+dy:h+1+dy, 1+dx:w+1+dx] - dwtile[1:h+1, 1:w+1]
+        for dx,dy in directions
+    ])
+    dire = np.where(np.min(slop, axis=0) < 0, np.argmin(slop, axis=0), -1)
+    dtile2 = np.zeros_like(dtile, dtype=np.float64)
+    mask_1 = dire>=0
+    dtile2[mask_1] = np.eye(8)[dire[mask_1]]
+    return dtile2
+def fastDirection2(surface: np.ndarray):
+    dwtile = np.pad(surface, 1, constant_values=9999)
+    slop = np.stack([
+        dwtile[1+dy:h+1+dy, 1+dx:w+1+dx] - dwtile[1:h+1, 1:w+1]
+        for dx,dy in directions
+    ])
+    slop = np.where(slop < 0, np.abs(slop), 0)
+    # print(np.sum(slop, axis=0)[0])
+    # print(np.sum(slop, axis=0).shape)
+    dire = np.where(np.sum(slop, axis=0)>0, slop / np.sum(slop, axis=0), 0)
+    dtile4 = dire
+    return dtile4
+# dtile4 = fastDirection2(dem+wtile)
+# print(np.any(np.array(np.sum(dtile4,axis=0),dtype=np.float16).reshape(h*w)>1))
 # exit(0)
 
 # flow speed
@@ -117,6 +175,36 @@ def fs3():
         # inflow += inflow_pad[1-dy:h+1-dy, 1-dx:w+1-dx]
     newflow = wtile - outflow + np.sum(inflow, axis=2)
     wtile = newflow
+def fs4():
+    global wtile
+
+    newflow = np.copy(wtile)
+    outflow = np.zeros((h, w), dtype="float64")
+    inflow  = np.zeros((h, w), dtype="float64")
+    # inflow  = np.zeros_like(dtile, dtype="float64")
+    surface = np.copy(dem + wtile)
+    sur_pad = np.pad(surface, 1, constant_values=0) 
+    dtile4 = fastDirection2(surface)
+
+    for i, (dx, dy) in enumerate(directions):
+        hi = np.copy(wtile)
+        dz = 5.0 if i%2==0 else 7.0710678118654755
+        dS = surface - sur_pad[1+dy:h+1+dy, 1+dx:w+1+dx]
+        dS = np.where(dS>=0, dS, 0)
+        dQ = (2/3*hi)*np.cbrt(np.square(5*hi/(2*hi+5)))*np.sqrt(dS/dz)
+        dQ = np.minimum(dQ, hi)
+        dQ = np.where(dQ>=0, dQ, 0)
+        dQ = dQ * dtile4[i, :, :]
+
+        outflow += dQ
+        # inflow[:, :, (i+4)%8] += dQ
+        inflow_pad = np.pad(dQ, 1)
+        inflow += inflow_pad[1-dy:h+1-dy, 1-dx:w+1-dx]
+    # newflow = wtile - outflow + np.sum(inflow, axis=2)
+    newflow = wtile - outflow + inflow
+    wtile = newflow
+def fs5():
+    global wtile
 # exit(0)
 
 # generate picture
@@ -140,10 +228,10 @@ def water_imager(water: np.ndarray, save_path: str):
 
     cv2.imwrite(save_path, BlueGR)
 
-OUTPUT_DIR = "/Users/fukaya/Documents/pythons/dem_proj/output/images"
+OUTPUT_DIR = "/Users/fukaya/Documents/pythons/dem_proj/output/images2"
 # calc start
 for step in range(5000+1):
-    fs3()
+    fs4()
     if step%50 == 0:
         print(f"{step*0.1:.1f}sec")
         water_imager(wtile, OUTPUT_DIR+f"/step_{step:05d}.png")
